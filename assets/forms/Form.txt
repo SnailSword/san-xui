@@ -1,0 +1,241 @@
+/**
+ * @file forms/Form.js
+ * @author leeight
+ */
+
+import {defineComponent, DataTypes} from 'san';
+import _ from 'lodash';
+import * as AsyncValidator from 'async-validator';
+import {create, focusTo} from '../components/util';
+
+const cx = create('ui-form');
+const Schema = AsyncValidator.default;
+
+export default defineComponent({
+    roleType: 'Form',
+    template: '<form class="{{mainClass}}"><slot/></form>',
+    dataTypes: {
+        /**
+         * 校验规则
+         */
+        rules: DataTypes.object,
+
+        /**
+         * 校验规则描述。如果有值，rules参数将失效。
+         */
+        descriptor: DataTypes.object,
+
+        /**
+         * 表单错误
+         * @default null
+         *
+         */
+        errors: DataTypes.object,
+
+        /**
+         * 表单数据
+         * @default false
+         */
+        formData: DataTypes.object,
+
+        /**
+         * 表单项数组
+         * @default []
+         */
+        formItems: DataTypes.array
+    },
+    computed: {
+        mainClass() {
+            return cx.mainClass(this);
+        }
+    },
+    messages: {
+        'form-element-changed'(arg) { // eslint-disable-line
+            const formItem = arg.target;
+            const payload = arg.value;
+            this.onFormElementChanged(formItem, payload);
+        },
+        'form-item-attached'({target}) {
+            this.data.push('formItems', target);
+        },
+        'form-item-detached'({target}) {
+            const formErrors = this.data.get('errors');
+            const name = target.data.get('name');
+
+            if (formErrors == null || (_.keys(formErrors).length === 1 && formErrors[name])) {
+                this.data.set('errors', null);
+            }
+            else {
+                formErrors[name] = null;
+                this.data.set('errors', formErrors);
+            }
+
+            /**
+             *
+             *  formData在移除formItems同时移除数据
+             *  好处： 1.formData数据干净， 不需要过滤脏数据。 坏处：移除后添加，原始值被移除，可能初始化错误。
+             *
+             *  formData在移除formItems同时不移除数据，好处坏处和上面相反。
+             *
+             *  故选择后者不移除数据
+             */
+
+            this.data.remove('formItems', target);
+        }
+    },
+    initData() {
+        return {
+            errors: null,
+            labelWidth: null,
+            formData: {},
+            formItems: []
+        };
+    },
+    onFormElementChanged(formItem, payload) {
+        const validator = this.data.get('rules');
+        if (!validator) {
+            return;
+        }
+
+        const name = formItem.data.get('name');
+        if (!validator.rules[name]) {
+            // 没有对应的验证规则
+            return;
+        }
+
+        this.data.set('formData.' + name, payload.value);
+        this.validateFormItem(name);
+    },
+    buildFormValidator(formItems) {
+        const newDescriptor = {};
+        const descriptor = this.data.get('descriptor');
+        if (!descriptor) {
+            return;
+        }
+
+        _.each(formItems, item => {
+            const name = item.data.get('name');
+            if (name !== undefined && descriptor[name]) {
+                newDescriptor[name] = descriptor[name];
+            }
+        });
+
+        const rules = new Schema(newDescriptor);
+        this.data.set('rules', rules);
+    },
+    getFormData() {
+        // 和asForm的getFormData 不完全一致。 因为formItem在移除时并不删除数据，这里可以获取有效数据。
+        const formItems  = this.data.get('formItems');
+        const fields = [];
+        _.each(formItems, item => {
+            const name = item.data.get('name');
+            if (name !== undefined) {
+                fields.push(name);
+            }
+        });
+        return _.pick(this.data.get('formData'), fields);
+    },
+    validateFormItem(name) {
+        return new Promise((resolve, reject) => {
+            const formData = this.data.get('formData');
+            if (!formData) {
+                reject();
+                return;
+            }
+            const validator = this.data.get('rules');
+            validator.validate(formData, (errors, fields) => {
+                if (!errors) {
+                    errors = []; // eslint-disable-line
+                }
+
+                let found = false;
+                for (let i = 0; i < errors.length; i++) {
+                    const item = errors[i];
+                    if (item.field === name) {
+                        found = true;
+                        this.data.set('errors.' + name, item.message);
+                        reject(name, item.message);
+                        break;
+                    }
+                }
+                if (!found) {
+                    this.data.set('errors.' + name, null);
+                    resolve();
+                }
+
+                let hasError = false;
+                const formErrors = this.data.get('errors');
+                for (const key in formErrors) { // eslint-disable-line
+                    if (formErrors[key]) {
+                        hasError = true;
+                        break;
+                    }
+                }
+                if (!hasError) {
+                    this.data.set('errors', null);
+                }
+            });
+        });
+    },
+    validateForm() {
+        return new Promise((resolve, reject) => {
+            const formData = this.data.get('formData');
+            if (!formData) {
+                reject();
+                return;
+            }
+            const validator = this.data.get('rules');
+            validator.validate(formData, (errors, fields) => {
+                if (!errors) {
+                    this.data.set('errors', null);
+                    resolve();
+                    return;
+                }
+
+                const errorsMap = {};
+                for (let i = 0; i < errors.length; i++) {
+                    const item = errors[i];
+                    errorsMap[item.field] = item.message;
+                }
+                this.data.set('errors', errorsMap);
+                this.focusToFirstControl(errorsMap);
+                reject(errorsMap);
+            });
+        });
+    },
+    inited() {
+        this.watch('errors', errors => {
+            const formItems = this.data.get('formItems');
+            formItems.forEach(formItem => {
+                const name = formItem.data && formItem.data.get('name');
+                if (name) {
+                    formItem.data.set('error', errors ? errors[name] : null);
+                }
+            });
+        });
+    },
+
+    attached() {
+        this.buildFormValidator(this.data.get('formItems'));
+        this.watch('formItems', formItems => {
+            this.buildFormValidator(formItems);
+        });
+    },
+    
+    focusToFirstControl(controls) {
+        const items = this.data.get('formItems');
+        if (controls) {
+            for (const key in items) {
+                const formItem = items[key];
+                if (formItem.data.get('name') in controls) {
+                    focusTo(formItem);
+                    return;
+                }
+            }
+        } else if (items.length) {
+            const formItem = items[0];
+            focusTo(formItem);
+        }
+    }
+
+});
